@@ -211,7 +211,6 @@ class BlockWiseFP8LinearMethod(QuantMethodBase):
             )
 
             layer.weight.copy_(quanted_weight_tensor, False)
-            # layer.weight_scale_inv.copy_(weight_block_scale_tensor, False)
             layer.weight_scale_inv.data = weight_block_scale_tensor
 
         if self.quant_config.is_checkpoint_bf16:
@@ -245,8 +244,6 @@ class BlockWiseFP8LinearMethod(QuantMethodBase):
         layer.weight_scale_inv.set_value(weight_scale)
 
     def apply(self, layer, x):
-        # print(f"[BlockWiseFP8LinearMethod][apply][per_token_cast_to_fp8] {layer.full_name()}")
-        # print(f"[BlockWiseFP8LinearMethod][apply][per_token_cast_to_fp8] {x}")
         if x.shape[0] != 0:
             x, x_scale_tensor = deep_gemm.utils.math.per_token_cast_to_fp8(x, use_ue8m0=True)
             x_scale_tensor = transform_scale_ue8m0(x_scale_tensor, mn=x.shape[-2])
