@@ -282,7 +282,7 @@ setup(
         "fastdeploy": [
             "model_executor/ops/gpu/*",
             "model_executor/ops/gpu/fastdeploy_ops/*",
-            "model_executor/ops/gpu/deep_gemm/include/**/*",
+            # "model_executor/ops/gpu/deep_gemm/include/**/*",
             "model_executor/ops/cpu/*",
             "model_executor/ops/cpu/fastdeploy_cpu_ops/*",
             "model_executor/ops/xpu/*",

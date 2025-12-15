@@ -19,7 +19,14 @@ from typing import Callable
 import paddle
 from paddle import nn
 
+paddle.compat.enable_torch_proxy(scope={"deep_gemm"})
+import deep_gemm
+
 import fastdeploy
+from fastdeploy.model_executor.layers.quantization.fp8_utils import (
+    quant_weight_ue8m0,
+    transform_scale_ue8m0,
+)
 from fastdeploy.model_executor.layers.utils import get_tensor
 from fastdeploy.model_executor.utils import (
     TensorTracker,
@@ -1371,19 +1378,24 @@ class BlockWiseFP8MoEMethod(QuantMethodBase):
 
             # 2.crate tmp tensor
 
-            weight = paddle.empty(shape=[weight_shape[0], weight_shape[2], weight_shape[1]], dtype=weight_dtype)
-            scale = paddle.empty(shape=[scale_shape[0], scale_shape[2], scale_shape[1]], dtype=scale_dtype)
+            weight = paddle.empty(shape=weight_shape, dtype=weight_dtype)
+            scale_list = []
 
             # 3.quantize weight
-            from fastdeploy.model_executor.layers.utils import per_block_cast_to_fp8
-
             for expert_id in range(layer.num_local_experts):
-                weight_quant, scale[expert_id] = per_block_cast_to_fp8(
-                    getattr(layer, unquantized_weight_name)[expert_id], self.quant_config.weight_block_size
+                weight_quant, weight_scale_fp32 = quant_weight_ue8m0(
+                    weight_dequant=getattr(layer, unquantized_weight_name)[expert_id].transpose([1, 0]).contiguous(),
+                    weight_block_size=self.quant_config.weight_block_size,
+                )
+                weight_scale = transform_scale_ue8m0(
+                    weight_scale_fp32, mn=weight_quant.shape[-2], weight_block_size=self.quant_config.weight_block_size
                 )
                 weight[expert_id].copy_(weight_quant, False)
+                scale_list.append(weight_scale)
+            scale = paddle.to_tensor(scale_list)
 
             free_tensor(getattr(layer, unquantized_weight_name))
+            free_tensor(getattr(layer, weight_name))
 
             # create weight
             setattr(
@@ -1391,22 +1403,23 @@ class BlockWiseFP8MoEMethod(QuantMethodBase):
                 weight_name,
                 layer.create_parameter(
                     shape=weight.shape,
-                    dtype=weight_dtype,
+                    dtype=weight.dtype,
                     default_initializer=paddle.nn.initializer.Constant(0),
                 ),
             )
+            getattr(layer, weight_name).copy_(weight, False)
             # create scale
             setattr(
                 layer,
                 scale_name,
                 layer.create_parameter(
                     shape=scale.shape,
-                    dtype=scale_dtype,
+                    dtype=scale.dtype,
                     default_initializer=paddle.nn.initializer.Constant(0),
                 ),
             )
-            getattr(layer, weight_name).copy_(weight.transpose([0, 2, 1]).contiguous(), False)
-            getattr(layer, scale_name).copy_(scale.transpose([0, 2, 1]).contiguous(), False)
+            scale_param = getattr(layer, scale_name)
+            scale_param.data = scale.transpose([0, 2, 1]).contiguous().mT()
 
         if self.quant_config.is_checkpoint_bf16:
             # dynamic quantize
