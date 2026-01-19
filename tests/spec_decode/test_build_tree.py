@@ -70,7 +70,7 @@ class TestBuildTree(unittest.TestCase):
 
         seq_lens_this_time = paddle.to_tensor([[4], [4]], dtype="int32")
         base_model_draft_tokens = paddle.to_tensor([[1042, 1042, 1042, 1042], [1042, 1042, 1042, 1042]], dtype="int64")
-        seq_lens_verified = paddle.to_tensor([[4], [4]], dtype="int32")
+        seq_lens_verified = paddle.to_tensor([[3], [3]], dtype="int32")
 
         # Output
         draft_tokens = paddle.to_tensor([[-1, -1, -1, -1], [-1, -1, -1, -1]], dtype="int64")
@@ -117,7 +117,7 @@ class TestBuildTree(unittest.TestCase):
         )
 
         paddle.set_printoptions(threshold=100000000)
-        print(tree_mask)
+        print(tree_mask[:, :, :7, :7])
 
         ref_retrive_index = np.array([[0, 1, 2, 3], [0, 1, 2, 3]], dtype="int64")
         ref_retrive_next_token = np.array([[1, 3, -1, -1], [1, -1, -1, -1]], dtype="int64")
@@ -130,10 +130,10 @@ class TestBuildTree(unittest.TestCase):
                         [False, False, True, True, True, True, True, True],
                         [False, False, False, True, True, True, True, True],
                         [False, False, False, False, True, True, True, True],
-                        [True, True, True, True, False, True, True, True],
-                        [True, True, True, True, False, False, True, True],
-                        [True, True, True, True, False, True, False, True],
-                        [True, True, True, True, False, False, True, False],
+                        [False, False, False, False, False, True, True, True],
+                        [False, False, False, False, True, False, True, True],
+                        [False, False, False, False, False, True, False, True],
+                        [True, True, True, True, True, True, True, True],
                     ]
                 ],
                 [
@@ -142,10 +142,10 @@ class TestBuildTree(unittest.TestCase):
                         [False, False, True, True, True, True, True, True],
                         [False, False, False, True, True, True, True, True],
                         [False, False, False, False, True, True, True, True],
-                        [True, True, True, True, False, True, True, True],
-                        [True, True, True, True, False, False, True, True],
-                        [True, True, True, True, False, True, False, True],
-                        [True, True, True, True, False, True, True, False],
+                        [False, False, False, False, False, True, True, True],
+                        [False, False, False, False, True, False, True, True],
+                        [False, False, False, False, True, True, False, True],
+                        [True, True, True, True, True, True, True, True],
                     ]
                 ],
             ],

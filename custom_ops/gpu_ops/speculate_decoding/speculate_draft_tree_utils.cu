@@ -34,10 +34,15 @@ __global__ void build_tree_kernel(const int64_t* top_scores_idx,
   int seq_len = seq_lens_verified[bid];
 
   int tree_mask_len = max_model_len + draft_token_num + 1;
-  int tree_mask_start_idx = bid * tree_mask_len * tree_mask_len +
-                            max_model_len * tree_mask_len + max_model_len + 1;
+  int tree_mask_batch_offset = bid * tree_mask_len * tree_mask_len;
+  int tree_mask_row_start_idx =
+      tree_mask_batch_offset + seq_len * tree_mask_len;
+  int tree_mask_start_idx = tree_mask_row_start_idx + seq_len + 1;
 
-  // visible for self, mask its siblings
+  // visible for verified tokens
+  for (int i = 0; i < seq_len; i++) {
+    tree_mask[tree_mask_row_start_idx + tid * tree_mask_len + i] = false;
+  }
 
   // printf(
   //     "bid: %d, tid: %d, seq_len: %d, "
