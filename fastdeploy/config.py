@@ -721,6 +721,9 @@ class SpeculativeConfig:
         # ngram match
         self.max_ngram_size: int = 5
         self.min_ngram_size: int = 2
+        # number of top candidates for single layer in draft tree
+        # When top_k is 1, the speculative method will be normal MTP.
+        self.tree_topk: int = 1
         # model for mtp/eagle/draft_model
         self.model: Optional[str] = None
         # quantization of model

@@ -935,7 +935,8 @@ void DraftModelUpdate(const paddle::Tensor& inter_next_tokens,
                       const paddle::Tensor& end_ids,
                       const paddle::Tensor& base_model_draft_tokens,
                       const int max_seq_len,
-                      const int substep);
+                      const int substep,
+                      const int tree_topk);
 
 std::vector<paddle::Tensor> EagleGetHiddenStates(
     const paddle::Tensor& input,
@@ -1120,6 +1121,41 @@ void ReasoningPhaseTokenConstraint(const paddle::Tensor& logits,
                                    const paddle::Tensor& output_cum_offsets,
                                    int64_t think_end_id,
                                    int64_t line_break_id);
+
+void BuildTree(const paddle::Tensor& top_scores_idx,
+               const paddle::Tensor& parent_list,
+               const paddle::Tensor& seq_lens_verified,
+               const paddle::Tensor& tree_mask,
+               const paddle::Tensor& positions,
+               const paddle::Tensor& retrive_index,
+               const paddle::Tensor& retrive_next_token,
+               const paddle::Tensor& retrive_next_sibling,
+               const int tree_topk,
+               const int depth,
+               const int draft_token_num,
+               const int max_model_len);
+
+void SpeculateVerifyTreeGreedy(const paddle::Tensor& accept_tokens,
+                               const paddle::Tensor& accept_num,
+                               const paddle::Tensor& step_idx,
+                               const paddle::Tensor& stop_flags,
+                               const paddle::Tensor& draft_tokens,
+                               const paddle::Tensor& retrive_index,
+                               const paddle::Tensor& retrive_next_token,
+                               const paddle::Tensor& retrive_next_sibling,
+                               const paddle::Tensor& accepted_retrive_index,
+                               const paddle::Tensor& verify_tokens,
+                               const paddle::Tensor& seq_lens_encoder,
+                               const paddle::Tensor& seq_lens_decoder,
+                               const paddle::Tensor& seq_lens_this_time,
+                               const paddle::Tensor& seq_lens_verified,
+                               const paddle::Tensor& actual_candidate_len,
+                               const paddle::Tensor& max_dec_len,
+                               const paddle::Tensor& end_tokens,
+                               const paddle::Tensor& is_block_step,
+                               const paddle::Tensor& output_cum_offsets,
+                               const int speculate_steps,
+                               const int max_seq_len);
 
 PYBIND11_MODULE(fastdeploy_ops, m) {
   m.def("get_expert_token_num",
@@ -1718,4 +1754,10 @@ PYBIND11_MODULE(fastdeploy_ops, m) {
   m.def("reasoning_phase_token_constraint",
         &ReasoningPhaseTokenConstraint,
         "reasoning_phase_token_constraint function");
+
+  m.def("eagle_build_tree", &BuildTree, "eagle_build_tree function");
+
+  m.def("speculate_verify_tree_greedy",
+        &SpeculateVerifyTreeGreedy,
+        "speculate_verify_tree_greedy function");
 }

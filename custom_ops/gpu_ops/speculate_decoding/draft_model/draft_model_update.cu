@@ -36,6 +36,7 @@ __global__ void draft_model_update_kernel(const int64_t* inter_next_tokens,
                                           const int end_ids_len,
                                           const int max_seq_len,
                                           const int substep,
+                                          const int tree_topk,
                                           const bool prefill_one_step_stop) {
   typedef cub::BlockReduce<int64_t, THREADBLOCK_SIZE> BlockReduce;
   __shared__ typename BlockReduce::TempStorage temp_storage;
@@ -60,27 +61,35 @@ __global__ void draft_model_update_kernel(const int64_t* inter_next_tokens,
       // decoder step
       if (seq_len_decoder > 0 && seq_len_encoder <= 0) {
         seq_lens_decoder[tid] += seq_len_this_time;
-        token_this_time = next_tokens_start[seq_len_this_time - 1];
-        draft_token_now[0] = next_tokens_start[seq_len_this_time - 1];
-        base_model_draft_tokens_now[substep + 1] = token_this_time;
         step_idx[tid] += seq_len_this_time;
-        pre_ids_now[step_idx[tid]] = token_this_time;
-
-
+        for (int i = 0; i < tree_topk; i++) {
+          token_this_time = next_tokens_start[i];
+          draft_token_now[i] = token_this_time;
+          base_model_draft_tokens_now[substep + 1 + i] = token_this_time;
+          pre_ids_now[step_idx[tid] + 1 + i] = token_this_time;
+        }
       } else {
         token_this_time = next_tokens_start[0];
-
-        // seq_lens_decoder[tid] = seq_lens_encoder[tid];
         seq_lens_decoder[tid] = seq_len_encoder + seq_len_decoder;
         seq_lens_encoder[tid] = 0;
-        pre_ids_now[1] = token_this_time;
+        for (int i = 0; i < tree_topk; i++) {
+          token_this_time = next_tokens_start[i];
+          draft_token_now[i] = token_this_time;
+          base_model_draft_tokens_now[substep + 1 + i] = token_this_time;
+          pre_ids_now[1 + i] = token_this_time;
+        }
         step_idx[tid] += 1;
-        draft_token_now[0] = token_this_time;
-        base_model_draft_tokens_now[substep + 1] = token_this_time;
       }
 
       // multi_end
-      if (is_in_end(token_this_time, end_ids, end_ids_len) || prefill_one_step_stop) {
+      bool any_token_is_in_end =
+          is_in_end(next_tokens_start[0], end_ids, end_ids_len);
+      for (int i = 1; i < tree_topk; i++) {
+        token_this_time = next_tokens_start[i];
+        any_token_is_in_end = any_token_is_in_end ||
+                              is_in_end(token_this_time, end_ids, end_ids_len);
+      }
+      if (any_token_is_in_end || prefill_one_step_stop) {
         stop_flags[tid] = true;
         stop_flag_now_int = 1;
         // max_dec_len
@@ -112,7 +121,6 @@ __global__ void draft_model_update_kernel(const int64_t* inter_next_tokens,
   }
 }
 
-
 void DraftModelUpdate(const paddle::Tensor& inter_next_tokens,
                       const paddle::Tensor& draft_tokens,
                       const paddle::Tensor& pre_ids,
@@ -127,7 +135,8 @@ void DraftModelUpdate(const paddle::Tensor& inter_next_tokens,
                       const paddle::Tensor& end_ids,
                       const paddle::Tensor& base_model_draft_tokens,
                       const int max_seq_len,
-                      const int substep) {
+                      const int substep,
+                      const int tree_topk) {
   auto seq_lens_this_time_shape = seq_lens_this_time.shape();
   auto cu_stream = seq_lens_this_time.stream();
   const int real_bsz = seq_lens_this_time_shape[0];
@@ -140,11 +149,11 @@ void DraftModelUpdate(const paddle::Tensor& inter_next_tokens,
   constexpr int BlockSize = 512;
 
   bool prefill_one_step_stop = false;
-  if (const char *env_p = std::getenv("PREFILL_NODE_ONE_STEP_STOP")) {
-      // std::cout << "Your PATH is: " << env_p << '\n';
-      if (env_p[0] == '1') {
-          prefill_one_step_stop = true;
-      }
+  if (const char* env_p = std::getenv("PREFILL_NODE_ONE_STEP_STOP")) {
+    // std::cout << "Your PATH is: " << env_p << '\n';
+    if (env_p[0] == '1') {
+      prefill_one_step_stop = true;
+    }
   }
 
   draft_model_update_kernel<BlockSize><<<1, BlockSize, 0, cu_stream>>>(
@@ -168,15 +177,14 @@ void DraftModelUpdate(const paddle::Tensor& inter_next_tokens,
       end_ids_len,
       max_seq_len,
       substep,
+      tree_topk,
       prefill_one_step_stop);
-
 
   auto not_need_stop_cpu =
       not_need_stop_gpu.copy_to(not_need_stop.place(), false);
   bool* not_need_stop_data = const_cast<bool*>(not_need_stop.data<bool>());
   not_need_stop_data[0] = not_need_stop_cpu.data<bool>()[0];
 }
-
 
 PD_BUILD_STATIC_OP(draft_model_update)
     .Inputs({"inter_next_tokens",
@@ -192,7 +200,7 @@ PD_BUILD_STATIC_OP(draft_model_update)
              "max_dec_len",
              "end_ids",
              "base_model_draft_tokens"})
-    .Attrs({"max_seq_len: int", "substep: int"})
+    .Attrs({"max_seq_len: int", "substep: int", "tree_topk: int"})
     .Outputs({"draft_tokens_out",
               "pre_ids_out",
               "seq_lens_this_time_out",

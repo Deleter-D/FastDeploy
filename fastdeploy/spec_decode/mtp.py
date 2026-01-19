@@ -70,6 +70,7 @@ else:
         update_attn_mask_offsets,
         set_data_ipc,
     )
+    from fastdeploy.spec_decode.draft_tree_utils import tree_select_top_k, build_tree
     from fastdeploy.model_executor.pre_and_post_process import pre_process, rebuild_padding
 
 from .base import Proposer
@@ -97,6 +98,7 @@ class MTPProposer(Proposer):
         self.target_model_inputs = target_model_inputs
         self.mtp_strategy = self.speculative_config.mtp_strategy
         self.hybrid_mode = self.mtp_strategy == "with_ngram" and self.max_draft_token_num > self.num_model_steps
+        self.draft_tree_mode = self.mtp_strategy == "draft_tree"
         self.enable_logprob = self.model_config.enable_logprob
         self.enable_draft_logprob = self.speculative_config.enable_draft_logprob
 
@@ -569,6 +571,13 @@ class MTPProposer(Proposer):
                 dtype="int32",
             )
 
+        if self.draft_tree_mode:
+            self.model_inputs["seq_lens_verified"] = self.target_model_inputs["seq_lens_verified"]
+            self.model_inputs["retrive_index"] = self.target_model_inputs["retrive_index"]
+            self.model_inputs["retrive_next_token"] = self.target_model_inputs["retrive_next_token"]
+            self.model_inputs["retrive_next_sibling"] = self.target_model_inputs["retrive_next_sibling"]
+            self.model_inputs["tree_mask"] = self.target_model_inputs["tree_mask"]
+
     def insert_tasks_v1(self, req_dicts: List[Request], num_running_requests: int):
 
         if "caches" not in self.model_inputs:
@@ -766,6 +775,7 @@ class MTPProposer(Proposer):
             kv_tile_ids_per_batch=self.model_inputs["kv_tile_ids_per_batch"],
             kv_num_blocks_x_cpu=self.model_inputs["kv_num_blocks_x_cpu"],
             attn_mask_offsets=self.model_inputs["attn_mask_offsets"] if self.enable_mm else None,
+            attn_mask=self.model_inputs["tree_mask"] if self.draft_tree_mode else None,
         )
 
         # Initialzie attention meta data
@@ -879,6 +889,7 @@ class MTPProposer(Proposer):
             self.model_inputs["base_model_draft_tokens"],
             self.max_model_len,
             self.model_inputs["substep"],
+            self.speculative_config.tree_topk,
         )
         if self.role == "prefill" and self.parallel_config.tensor_parallel_rank == 0:
             skip_save = bool(int(envs.ENABLE_V1_KVCACHE_SCHEDULER))
@@ -909,6 +920,11 @@ class MTPProposer(Proposer):
         step_use_cudagraph: bool
             Whether to use cuda graph. Use the target model flag to avoid hanging problems with EP.
         """
+        if self.draft_tree_mode:
+            score_list = []
+            token_list = []
+            parents_list = []
+            path_scores = None
         for substep in range(self.num_model_steps):
             if self.model_inputs["not_need_stop"]:
                 self.model_inputs["substep"] = substep
@@ -1032,6 +1048,24 @@ class MTPProposer(Proposer):
                     self.model_inputs,
                 )
 
+                if self.draft_tree_mode:
+                    topk_probs, topk_token_ids = sampled_token_ids
+                    sampled_token_ids = topk_token_ids
+                    sampled_token_ids, path_scores, tree_info, target_hidden_states = tree_select_top_k(
+                        depth=substep,
+                        topk_probs=topk_probs,
+                        topk_token_ids=topk_token_ids,
+                        path_scores=path_scores,
+                        hidden_states=hidden_states,
+                        tree_topk=self.speculative_config.tree_topk,
+                    )
+                    print(f"[MTPProposer] sampled_token_ids: {sampled_token_ids}")
+                    print(f"[MTPProposer] path_scores: {path_scores}")
+                    print(f"[MTPProposer] tree_info: {tree_info}")
+                    score_list.append(tree_info[0])
+                    token_list.append(tree_info[1])
+                    parents_list.append(tree_info[2])
+
                 if (
                     not is_dummy_run
                     and self.parallel_config.tensor_parallel_rank == 0
@@ -1062,11 +1096,34 @@ class MTPProposer(Proposer):
                     )
 
                 self._post_process(sampled_token_ids)
-                if substep != self.num_model_steps - 1:
+                if not self.draft_tree_mode and substep != self.num_model_steps - 1:
                     self._get_self_hidden_states(hidden_states)
             else:
                 if hasattr(self.model, "empty_input_forward"):
                     self.model.empty_input_forward(forward_meta=self.forward_meta)
+
+        if self.draft_tree_mode:
+            print(f"[MTPProposer][End] score_list: {score_list}")
+            print(f"[MTPProposer][End] token_list: {token_list}")
+            print(f"[MTPProposer][End] parents_list: {parents_list}")
+            if len(score_list) > 0 and len(token_list) > 0 and len(parents_list) > 0:
+                build_tree(
+                    score_list,
+                    token_list,
+                    parents_list,
+                    self.model_inputs["seq_lens_this_time"],
+                    self.model_inputs["base_model_draft_tokens"],
+                    self.model_inputs["draft_tokens"],
+                    self.model_inputs["retrive_index"],
+                    self.model_inputs["retrive_next_token"],
+                    self.model_inputs["retrive_next_sibling"],
+                    self.model_inputs["seq_lens_verified"],
+                    self.model_inputs["tree_mask"],
+                    self.max_draft_token_num,
+                    self.speculative_config.num_model_steps,
+                    self.speculative_config.tree_topk,
+                    self.max_model_len,
+                )
 
     def _propose_xpu(self, step_use_cudagraph: bool = False, is_dummy_run: bool = False):
         """

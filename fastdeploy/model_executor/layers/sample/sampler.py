@@ -618,6 +618,8 @@ class SpeculativeSampler(nn.Layer):
         self.think_end_id = fd_config.model_config.think_end_id
         self.line_break_id = fd_config.model_config.line_break_id
         self.enf_gen_phase_tag = fd_config.speculative_config.enf_gen_phase_tag
+        self.draft_tree_mode = fd_config.speculative_config.mtp_strategy == "draft_tree"
+        self.num_model_steps = fd_config.speculative_config.num_model_steps
 
     def pre_process(self, skip_idx_list: List[int] = []):
         """pre process before running"""
@@ -742,7 +744,11 @@ class SpeculativeSampler(nn.Layer):
     ) -> paddle.Tensor:
         """ """
 
-        from fastdeploy.model_executor.ops.gpu import speculate_verify, top_p_candidates
+        from fastdeploy.model_executor.ops.gpu import (
+            speculate_verify,
+            speculate_verify_tree_greedy,
+            top_p_candidates,
+        )
 
         logits = apply_speculative_penalty_multi_scores(
             sampling_metadata.pre_token_ids,
@@ -796,34 +802,59 @@ class SpeculativeSampler(nn.Layer):
             max_model_len,
         )
 
-        speculate_verify(
-            sampled_token_ids,
-            share_inputs["accept_tokens"],
-            share_inputs["accept_num"],
-            share_inputs["step_idx"],
-            share_inputs["stop_flags"],
-            share_inputs["seq_lens_encoder"],
-            share_inputs["seq_lens_decoder"],
-            share_inputs[
-                "draft_tokens"
-            ],  # Both input and output, need to write the last 1 token accepted to position 0.
-            share_inputs["seq_lens_this_time"],
-            verify_tokens,
-            verify_scores,
-            share_inputs["max_dec_len"],
-            sampling_metadata.eos_token_ids,
-            share_inputs["is_block_step"],
-            share_inputs["output_cum_offsets"],
-            actual_candidate_len,
-            share_inputs["actual_draft_token_num"],
-            sampling_metadata.top_p,
-            share_inputs["reasoning_status"],
-            max_model_len,
-            self.speculative_verify_window,
-            True,  # enable_topp
-            (self.speculative_benchmark_mode or reject_all_drafts),
-            accept_all_drafts,
-        )
+        if self.draft_tree_mode:
+            speculate_verify_tree_greedy(
+                share_inputs["accept_tokens"],
+                share_inputs["accept_num"],
+                share_inputs["step_idx"],
+                share_inputs["stop_flags"],
+                share_inputs["draft_tokens"],
+                share_inputs["retrive_index"],
+                share_inputs["retrive_next_token"],
+                share_inputs["retrive_next_sibling"],
+                share_inputs["accepted_retrive_index"],
+                verify_tokens,
+                share_inputs["seq_lens_encoder"],
+                share_inputs["seq_lens_decoder"],
+                share_inputs["seq_lens_this_time"],
+                share_inputs["seq_lens_verified"],
+                actual_candidate_len,
+                share_inputs["max_dec_len"],
+                sampling_metadata.eos_token_ids,
+                share_inputs["is_block_step"],
+                share_inputs["output_cum_offsets"],
+                self.num_model_steps,
+                max_model_len,
+            )
+        else:
+            speculate_verify(
+                sampled_token_ids,
+                share_inputs["accept_tokens"],
+                share_inputs["accept_num"],
+                share_inputs["step_idx"],
+                share_inputs["stop_flags"],
+                share_inputs["seq_lens_encoder"],
+                share_inputs["seq_lens_decoder"],
+                share_inputs[
+                    "draft_tokens"
+                ],  # Both input and output, need to write the last 1 token accepted to position 0.
+                share_inputs["seq_lens_this_time"],
+                verify_tokens,
+                verify_scores,
+                share_inputs["max_dec_len"],
+                sampling_metadata.eos_token_ids,
+                share_inputs["is_block_step"],
+                share_inputs["output_cum_offsets"],
+                actual_candidate_len,
+                share_inputs["actual_draft_token_num"],
+                sampling_metadata.top_p,
+                share_inputs["reasoning_status"],
+                max_model_len,
+                self.speculative_verify_window,
+                True,  # enable_topp
+                (self.speculative_benchmark_mode or reject_all_drafts),
+                accept_all_drafts,
+            )
 
         num_logprobs = sampling_metadata.max_num_logprobs
         batch_token_num = None
@@ -976,6 +1007,7 @@ class MTPSampler(nn.Layer):
             raise NotImplementedError
         self.logprobs_mode = fd_config.model_config.logprobs_mode
         self.enable_draft_logprob = fd_config.speculative_config.enable_draft_logprob
+        self.draft_tree_mode = fd_config.speculative_config.mtp_strategy == "draft_tree"
 
     def pre_process(self, skip_idx_list: List[int] = []):
         """pre process before running"""
@@ -1136,7 +1168,22 @@ class MTPSampler(nn.Layer):
         )
         probs = F.softmax(logits)
 
-        next_tokens = paddle.argmax(probs, axis=-1)
+        if self.draft_tree_mode:
+            print(f"[MTPSampler] probs: {probs.shape}")
+            real_bsz = share_inputs["seq_lens_this_time"].shape[0]
+            # token_counts = paddle.where(
+            #     share_inputs["seq_lens_encoder"][:real_bsz].squeeze(1) != 0,
+            #     paddle.ones_like(share_inputs["seq_lens_encoder"][:real_bsz].squeeze(1)),
+            #     share_inputs["seq_lens_this_time"].squeeze(1),
+            # )
+            # print(f"[MTPSampler] token_counts: {token_counts}")
+            # last_token_idx_per_batch = paddle.cumsum(token_counts) - 1
+            # print(f"[MTPSampler] probs: {probs[last_token_idx_per_batch[:real_bsz]].shape}")
+            topk_probs, topk_token_ids = paddle.topk(probs, sampling_metadata.top_k, axis=-1)
+            print(f"[MTPSampler] sampled_token_ids: {topk_token_ids}")
+            next_tokens = (topk_probs, topk_token_ids)
+        else:
+            next_tokens = paddle.argmax(probs, axis=-1)
 
         token_ids = None
         logprobs_tensors = None

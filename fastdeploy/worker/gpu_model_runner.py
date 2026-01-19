@@ -122,6 +122,7 @@ class GPUModelRunner(ModelRunnerBase):
         self.device_id = device_id
         self.speculative_method = self.fd_config.speculative_config.method
         self.speculative_decoding = self.speculative_method is not None
+        self.draft_tree_mode = self.speculative_config.mtp_strategy == "draft_tree"
         self.enable_logprob = fd_config.model_config.enable_logprob
         self.enable_early_stop = self.fd_config.early_stop_config.enable_early_stop
         self.is_pooling_model = self.fd_config.model_config.runner_type == "pooling"
@@ -726,6 +727,11 @@ class GPUModelRunner(ModelRunnerBase):
                 self.forward_batch_reqs_list[idx] = request
                 has_prefill_task = True
 
+                if self.draft_tree_mode:
+                    self.share_inputs["tree_mask"][idx, 0, :length, :length] = paddle.logical_not(
+                        paddle.tril(paddle.ones(shape=(length, length)).astype("bool"))
+                    )
+
                 # Routing Replay
                 if self.fd_config.routing_replay_config.enable_routing_replay:
                     if prefill_start_index == 0:
@@ -1326,6 +1332,8 @@ class GPUModelRunner(ModelRunnerBase):
 
         if self.speculative_decoding:
             max_draft_token_num = self.speculative_config.num_speculative_tokens
+            num_model_steps = self.speculative_config.num_model_steps
+            tree_topk = self.speculative_config.tree_topk
             self.share_inputs["input_ids_cpu"] = paddle.full(
                 shape=[max_num_seqs, self.model_config.max_model_len],
                 fill_value=1,
@@ -1338,7 +1346,14 @@ class GPUModelRunner(ModelRunnerBase):
             )
             self.share_inputs["accept_num"] = paddle.full(shape=[max_num_seqs], fill_value=0, dtype="int32")
             self.share_inputs["draft_tokens"] = paddle.full(
-                shape=[max_num_seqs, max_draft_token_num + 1],
+                shape=[
+                    max_num_seqs,
+                    (
+                        (tree_topk ** (num_model_steps + 1) - 1) // (tree_topk - 1)
+                        if self.draft_tree_mode
+                        else (max_draft_token_num + 1)
+                    ),
+                ],
                 fill_value=0,
                 dtype="int64",
             )
@@ -1370,6 +1385,30 @@ class GPUModelRunner(ModelRunnerBase):
             self.share_inputs["cu_batch_token_offset"] = paddle.full(
                 shape=[max_num_seqs + 1], fill_value=0, dtype="int32"
             )
+            if self.draft_tree_mode:
+                self.share_inputs["seq_lens_verified"] = paddle.full([max_num_seqs, 1], 0, dtype="int32")
+                self.share_inputs["retrive_index"] = paddle.full(
+                    shape=[max_num_seqs, max_draft_token_num + 1], fill_value=-1, dtype="int64"
+                )
+                self.share_inputs["retrive_next_token"] = paddle.full(
+                    shape=[max_num_seqs, max_draft_token_num + 1], fill_value=-1, dtype="int64"
+                )
+                self.share_inputs["retrive_next_sibling"] = paddle.full(
+                    shape=[max_num_seqs, max_draft_token_num + 1], fill_value=-1, dtype="int64"
+                )
+                self.share_inputs["tree_mask"] = paddle.full(
+                    shape=[
+                        max_num_seqs,
+                        1,
+                        self.model_config.max_model_len + max_draft_token_num + 1,
+                        self.model_config.max_model_len + max_draft_token_num + 1,
+                    ],
+                    fill_value=True,
+                    dtype="bool",
+                )
+                self.share_inputs["accepted_retrive_index"] = paddle.full(
+                    shape=[max_num_seqs, max_draft_token_num + 1], fill_value=-1, dtype="int64"
+                )
 
         if self.enable_mm:
             head_dim = self.model_config.head_dim
@@ -1562,6 +1601,7 @@ class GPUModelRunner(ModelRunnerBase):
             kv_tile_ids_per_batch=self.share_inputs["kv_tile_ids_per_batch"],
             kv_num_blocks_x_cpu=self.share_inputs["kv_num_blocks_x_cpu"],
             routing_replay_table=routing_replay_table,
+            attn_mask=self.share_inputs["tree_mask"] if self.draft_tree_mode else None,
         )
 
         dist_status = self.collect_distributed_status()
