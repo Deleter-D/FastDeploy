@@ -77,11 +77,6 @@ class TestBuildTree(unittest.TestCase):
         retrive_index = paddle.full(shape=[batch_size, max_draft_token_num + 1], fill_value=-1, dtype="int64")
         retrive_next_token = paddle.full(shape=[batch_size, max_draft_token_num + 1], fill_value=-1, dtype="int64")
         retrive_next_sibling = paddle.full(shape=[batch_size, max_draft_token_num + 1], fill_value=-1, dtype="int64")
-        # tree_mask = paddle.full(
-        #     shape=[batch_size * (max_draft_token_num + 1) * (max_draft_token_num + 1)],
-        #     fill_value=False,
-        #     dtype="bool",
-        # )
         tree_mask = paddle.full(
             shape=[
                 batch_size,
